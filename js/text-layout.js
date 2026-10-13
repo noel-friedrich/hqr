@@ -1,6 +1,5 @@
-import { renderTomThumbLine, validateTomThumbText } from "./tom-thumb-font.js";
+import { DEFAULT_FONT_ID, getFont } from "./fonts.js";
 
-const GLYPH_ADVANCE = 4;
 const LINE_GAP = 1;
 const BORDER = 1;
 
@@ -86,14 +85,15 @@ function trimUnusedVerticalRows(pixels) {
   return pixels.slice(firstUsedRow, lastUsedRow + 1);
 }
 
-export function renderTextLines(lines) {
+export function renderTextLines(lines, fontId = DEFAULT_FONT_ID) {
+  const font = getFont(fontId);
   const text = lines.join("");
-  validateTomThumbText(text);
+  font.validateText(text);
   const renderedLines = lines.map((line) =>
-    trimUnusedVerticalRows(renderTomThumbLine(line)),
+    trimUnusedVerticalRows(font.renderLine(line)),
   );
   const contentWidth =
-    Math.max(...lines.map((line) => line.length)) * GLYPH_ADVANCE - 1;
+    Math.max(...renderedLines.map((pixels) => pixels[0].length));
   const contentHeight =
     renderedLines.reduce((sum, pixels) => sum + pixels.length, 0) +
     (lines.length - 1) * LINE_GAP;
@@ -114,8 +114,8 @@ export function renderTextLines(lines) {
   return { pixels, width, height, lines };
 }
 
-export function renderTextBlock(text, charactersPerLine) {
-  return renderTextLines(wrapText(text, charactersPerLine));
+export function renderTextBlock(text, charactersPerLine, fontId = DEFAULT_FONT_ID) {
+  return renderTextLines(wrapText(text, charactersPerLine), fontId);
 }
 
 function touchesFunctionModule(functionMap, top, left, block) {
@@ -273,12 +273,15 @@ function finishPlacement(rectangles) {
   };
 }
 
-function findConnectedPlacements(model, text, horizontalOnly) {
+function findConnectedPlacements(model, text, horizontalOnly, fontId, allowWrap) {
   const size = model.matrix.length;
-  const maximumCharactersPerLine = Math.floor((size - BORDER * 2 + 1) / 4);
+  const maximumCharactersPerLine = Math.floor((size - BORDER * 2 + 1) / getFont(fontId).advance);
   const placements = [];
-  for (const lines of makeLineVariants(text, maximumCharactersPerLine)) {
-    const block = renderTextLines(lines);
+  const lineVariants = allowWrap
+    ? makeLineVariants(text, maximumCharactersPerLine)
+    : [[text]];
+  for (const lines of lineVariants) {
+    const block = renderTextLines(lines, fontId);
     if (horizontalOnly && block.width < block.height) continue;
     placements.push(...enumerateBlockPlacements(model, block));
   }
@@ -324,7 +327,7 @@ function followsReadingOrder(previous, next) {
   );
 }
 
-function findSplitPlacements(model, text, horizontalOnly) {
+function findSplitPlacements(model, text, horizontalOnly, fontId) {
   const results = [];
   const maximumRectangles = Math.min(4, text.length);
 
@@ -336,7 +339,7 @@ function findSplitPlacements(model, text, horizontalOnly) {
     for (const lengths of balancedLengthVariants(text.length, rectangleCount)) {
       const chunks = splitByLengths(text, lengths);
       const candidateSets = chunks.map((chunk) => {
-        const block = renderTextBlock(chunk, chunk.length);
+        const block = renderTextBlock(chunk, chunk.length, fontId);
         if (horizontalOnly && block.width < block.height) return [];
         return enumerateBlockPlacements(model, block, 60);
       });
@@ -438,9 +441,12 @@ export function findTextPlacements(
   maximumCandidates = 24,
   allowSplit = false,
   horizontalOnly = false,
+  fontId = DEFAULT_FONT_ID,
+  allowWrap = true,
 ) {
+  getFont(fontId).validateText(text);
   const connected = sortPlacements(
-    findConnectedPlacements(model, text, horizontalOnly),
+    findConnectedPlacements(model, text, horizontalOnly, fontId, allowWrap),
   );
   const prioritizedConnected = prioritizeDiversePlacements(
     connected,
@@ -449,7 +455,7 @@ export function findTextPlacements(
   if (!allowSplit) return prioritizedConnected.slice(0, maximumCandidates);
 
   const split = sortPlacements(
-    findSplitPlacements(model, text, horizontalOnly),
+    findSplitPlacements(model, text, horizontalOnly, fontId),
   );
   const prioritizedSplit = prioritizeDiversePlacements(
     split,

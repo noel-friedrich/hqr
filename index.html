@@ -125,11 +125,15 @@
                         <p class="dev-mode">
                             Enter a given message (e.g. a website url) and
                             generate a QR code that contains the encoded message
-                            in a tiny bitmap font called
+                            in a tiny bitmap font. Choose the original
                             <a
                                 href="https://robey.lag.net/2010/01/23/tiny-monospace-font.html"
                                 >Tom-Thumb</a
-                            >. Keep your message short; long texts will take
+                            > or a
+                            <a
+                                href="https://github.com/KK-mp4/pixiie-font-generator"
+                                >Pixiie</a
+                            > font below. Keep your message short; long texts will take
                             long times to optimize.
                             <span class="dev-mode">
                                 <br />Importantly, this doesn't just place the
@@ -153,6 +157,14 @@
                                 >)</span
                             >
                             <textarea id="text-qr-message">67</textarea>
+                        </label>
+                        <label class="field">
+                            <span>Font</span>
+                            <select id="text-qr-font"></select>
+                        </label>
+                        <label class="check-row">
+                            <input type="checkbox" id="text-qr-allow-wrap" checked />
+                            <span>Allow text wrapping</span>
                         </label>
                         <label class="field dev-mode">
                             <span>Maximum ECC budget used</span>
@@ -203,8 +215,7 @@
                         <label class="check-row dev-mode">
                             <input type="checkbox" id="text-qr-allow-split" />
                             <span
-                                >Allow text to be split into separate
-                                rectangles</span
+                                >Allow text to be split into separate rectangles</span
                             >
                         </label>
                         <label class="check-row dev-mode">

@@ -7,7 +7,7 @@ import {
   rectangleGap,
   renderTextBlock,
 } from "./text-layout.js";
-import { validateTomThumbText } from "./tom-thumb-font.js";
+import { DEFAULT_FONT_ID, getFont } from "./fonts.js";
 
 function bitIsSet(bits, index) {
   return (bits[index >>> 5] & (1 << (index & 31))) !== 0;
@@ -431,8 +431,10 @@ function throwIfAborted(signal) {
 export async function findOptimalTextQr({
   message,
   displayText = message,
+  fontId = DEFAULT_FONT_ID,
   budgetRatio = 0.8,
   allowSplit = false,
+  allowWrap = true,
   horizontalOnly = false,
   startVersion = 1,
   maxVersion = 40,
@@ -459,7 +461,14 @@ export async function findOptimalTextQr({
   ) {
     throw new Error("Starting QR version is outside the search range.");
   }
-  validateTomThumbText(displayText);
+  getFont(fontId).validateText(displayText);
+  if (!allowWrap && !allowSplit) {
+    const textWidth = getFont(fontId).renderLine(displayText)[0].length + 2;
+    const maximumWidth = 17 + maxVersion * 4;
+    if (textWidth > maximumWidth) {
+      throw new Error(`Text needs ${textWidth} modules on one line, but Version ${maxVersion} is only ${maximumWidth} modules wide. Enable text wrapping or splitting, shorten the text, or choose a smaller font.`);
+    }
+  }
   if (
     !Array.isArray(maskPatterns) ||
     maskPatterns.length === 0 ||
@@ -503,6 +512,8 @@ export async function findOptimalTextQr({
         96,
         allowSplit,
         horizontalOnly,
+        fontId,
+        allowWrap,
       );
       if (!placements.length) continue;
       if (!paddingBasis) {
@@ -580,6 +591,8 @@ export async function findOptimalTextQr({
       const [result, ...pendingResults] = uniqueResults;
       return {
         ...result,
+        fontId,
+        allowWrap,
         continuation: {
           pendingResults,
           nextVersion: version + 1,
