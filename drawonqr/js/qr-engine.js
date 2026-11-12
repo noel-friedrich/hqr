@@ -22,7 +22,7 @@ export function isMetadataModule(functionType) {
 export function canDrawOn(model, row, column, allowMetadata = false, allowAlignment = false) {
   const functionType = model.functionMap[row]?.[column];
   return functionType === "" || (allowMetadata && isMetadataModule(functionType)) ||
-    (allowAlignment && functionType === "alignment");
+    (allowAlignment && (functionType === "alignment" || functionType === "timing"));
 }
 
 export function getMetadataRegions(version) {

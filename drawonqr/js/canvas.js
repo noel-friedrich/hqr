@@ -28,7 +28,7 @@ export class DrawingCanvas {
       const target = targets.get(row * size + column);
       const dark = target ? target.value : baseline;
       const metadata = isMetadataModule(model.functionMap[row][column]);
-      const alignment = model.functionMap[row][column] === "alignment";
+      const alignment = ["alignment", "timing"].includes(model.functionMap[row][column]);
       const color = !highlightAreas ? (dark ? [0, 0, 0] : [255, 255, 255])
         : target
         ? (dark ? [18, 109, 60] : [185, 227, 197])

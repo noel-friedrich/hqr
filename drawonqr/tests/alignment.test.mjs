@@ -11,7 +11,7 @@ function alignmentTargets(model) {
   ));
 }
 
-test("alignment drawing is independent of metadata permission and protects other functions", () => {
+test("alignment/timing drawing is independent of metadata permission and protects other functions", () => {
   assert.equal(alignmentTargets(generateBaseline({ ...settings, version: 1 })).length, 0);
   assert.equal(alignmentTargets(generateBaseline(settings)).length, 25);
   const model = generateBaseline({ ...settings, version: 7 });
@@ -20,7 +20,7 @@ test("alignment drawing is independent of metadata permission and protects other
     for (const allowAlignment of [false, true]) {
       model.functionMap.forEach((line, row) => line.forEach((kind, column) => {
         const expected = !kind || (allowMetadata && isMetadataModule(kind)) ||
-          (allowAlignment && kind === "alignment");
+          (allowAlignment && (kind === "alignment" || kind === "timing"));
         assert.equal(canDrawOn(model, row, column, allowMetadata, allowAlignment), expected);
       }));
     }
@@ -54,5 +54,24 @@ test("enabled alignment edits do not spend data or metadata ECC", async () => {
           ? !model.matrix[row][column] : model.matrix[row][column]);
       }
     }
+  }
+});
+
+test("timing patterns are editable only with the alignment/timing option, including version one", async () => {
+  for (const version of [1, 2, 7]) {
+    const model = generateBaseline({ ...settings, version });
+    const targets = model.functionMap.flatMap((line, row) => line.flatMap((kind, column) =>
+      kind === "timing" ? [{ row, column, value: !model.matrix[row][column] }] : [],
+    ));
+    assert.ok(targets.length > 0);
+    const locked = await optimizeDrawing({ ...settings, version, targets, allowMetadata: true });
+    assert.deepEqual(locked.edited, model.matrix);
+    const editable = await optimizeDrawing({ ...settings, version, targets, allowAlignment: true });
+    assert.equal(editable.totalDamaged, 0);
+    assert.equal(editable.metadataDamaged, 0);
+    assert.equal(editable.readable, true);
+    model.matrix.forEach((line, row) => line.forEach((value, column) => {
+      assert.equal(editable.edited[row][column], model.functionMap[row][column] === "timing" ? !value : value);
+    }));
   }
 });

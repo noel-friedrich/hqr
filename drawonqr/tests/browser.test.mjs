@@ -118,6 +118,8 @@ try {
   assert.equal(await evaluate('document.querySelector("#highlight-areas").checked'), true);
   assert.equal(await evaluate('document.querySelectorAll(".legend-item").length'), 4);
   assert.equal(await evaluate('document.querySelector("#allow-alignment").checked'), false);
+  assert.equal(await evaluate('document.querySelector("#allow-alignment").closest("label").textContent.trim()'), "Allow drawing on alignment/timing patterns");
+  assert.equal(await evaluate('document.querySelector(".legend-swatch.alignment").parentElement.textContent'), "Alignment/timing");
   const protectedPixel = () => evaluate("[...document.querySelector('canvas').getContext('2d').getImageData(3,3,1,1).data]");
   const protectedJobs = await evaluate("__jobs.length");
   assert.deepEqual(await protectedPixel(), [180, 35, 24, 255]);
@@ -401,6 +403,42 @@ try {
   assert.deepEqual(await alignmentPixel(), [185, 227, 197, 255]);
   assert.deepEqual(await metadataPixel(), await evaluate("__lastResult.model.matrix[0][8] ? [180,90,10,255] : [255,226,184,255]"));
   console.log("pass: blue alignment areas, opt-in drawing, undo/redo, and independent permission changes");
+
+  await click("#allow-alignment");
+  await ready();
+  await set("#version", "1");
+  await ready();
+  const timing = { row: 6, column: 10 };
+  assert.equal(await evaluate("__lastResult.model.functionMap[6][10]"), "timing");
+  const timingPixel = () => evaluate("[...document.querySelector('canvas').getContext('2d').getImageData(10,6,1,1).data]");
+  assert.deepEqual(await timingPixel(), [36, 92, 166, 255]);
+  const timingJobs = await evaluate("__jobs.length");
+  await stroke(timing);
+  assert.equal(await evaluate("__jobs.length"), timingJobs);
+  await click("#highlight-areas");
+  assert.deepEqual(await timingPixel(), [0, 0, 0, 255]);
+  await click("#highlight-areas");
+  assert.deepEqual(await timingPixel(), [36, 92, 166, 255]);
+  await click("#allow-alignment");
+  await ready();
+  await click('[data-color="white"]');
+  await stroke(timing);
+  await ready();
+  assert.equal(await evaluate("__lastResult.edited[6][10]"), false);
+  assert.equal(await evaluate("__lastResult.totalDamaged"), 0);
+  assert.equal(await evaluate("__lastResult.metadataDamaged"), 0);
+  assert.deepEqual(await timingPixel(), [185, 227, 197, 255]);
+  await click("#undo");
+  await ready();
+  assert.deepEqual(await timingPixel(), [36, 92, 166, 255]);
+  await click("#redo");
+  await ready();
+  assert.deepEqual(await timingPixel(), [185, 227, 197, 255]);
+  await click("#allow-alignment");
+  await ready();
+  assert.equal(await evaluate("__jobs.at(-1).settings.targets.length"), 0);
+  assert.deepEqual(await timingPixel(), [36, 92, 166, 255]);
+  console.log("pass: blue timing patterns, opt-in drawing, highlight toggle, undo/redo, and relocking");
 
   await command("Page.captureScreenshot", { format: "png" }).then(async ({data}) => {
     if (process.env.DRAWONQR_SCREENSHOT) {
