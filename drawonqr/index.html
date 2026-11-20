@@ -11,6 +11,7 @@
       <section class="workspace" aria-label="QR drawing workspace">
         <div class="workspace-toolbar" aria-label="Drawing tools">
           <div class="tool-group" role="group" aria-label="Tool">
+            <button type="button" data-tool="select" aria-pressed="false">Select</button>
             <button type="button" data-tool="pencil" aria-pressed="true">Pencil</button>
             <button type="button" data-tool="rectangle" aria-pressed="false">Rectangle</button>
             <button type="button" data-tool="restore" aria-pressed="false">Restore</button>
@@ -25,6 +26,8 @@
         <div class="grid-frame frame">
           <div class="qr-grid" id="qr-grid" tabindex="0" role="application" aria-label="Draw on QR code">
             <canvas id="qr-canvas" aria-hidden="true"></canvas>
+            <canvas id="image-preview" aria-hidden="true" hidden></canvas>
+            <div id="image-layer"></div>
           </div>
         </div>
         <div class="grid-legend" id="grid-legend" aria-label="Area colors">
@@ -117,9 +120,33 @@
             <button type="button" id="png" disabled>Download PNG</button>
             <button type="button" id="share" disabled>Share</button>
           </section>
+          <section class="panel-section image-controls">
+            <button type="button" id="add-image">Add image</button>
+            <label class="check-row">
+              <input type="checkbox" id="allow-image-approximation" />
+              <span>Allow image approximation (80%+)</span>
+            </label>
+          </section>
         </aside>
       </div>
     </main>
+    <dialog id="image-dialog" aria-labelledby="image-dialog-title">
+      <header class="image-dialog-header">
+        <h2 id="image-dialog-title">Image Upload</h2>
+        <button type="button" id="image-close" aria-label="Close">x</button>
+      </header>
+      <button type="button" id="image-drop">
+        <span>Drop image or click to upload</span>
+        <canvas id="image-upload-preview" hidden></canvas>
+      </button>
+      <input type="file" id="image-file" accept="image/*" multiple hidden />
+      <label class="field" id="image-threshold-field" hidden>
+        <span>Brightness Threashhold</span>
+        <input type="range" id="image-threshold" min="-256" max="256" value="0" />
+      </label>
+      <p id="image-upload-error" role="alert"></p>
+      <button type="button" id="image-confirm" disabled>Add Image to QR</button>
+    </dialog>
     <script type="module" src="js/main.js"></script>
   </body>
 </html>

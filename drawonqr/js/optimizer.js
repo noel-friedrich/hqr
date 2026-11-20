@@ -1,5 +1,6 @@
 import { encodeDataCodewords, encodeErrorCorrectionBlocks } from "./data-encoding.js";
-import { analyzeDamage, applyChanges, canDrawOn, generateBaseline } from "./qr-engine.js";
+import { analyzeDamage, canDrawOn, generateBaseline } from "./qr-engine.js";
+import { applyImageConstraints } from "./image-constraints.js";
 
 const LEVELS = ["H", "Q", "M", "L"];
 const MASKS = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -36,18 +37,20 @@ export function smallestVersion(message, level = "auto", maxVersion = 40) {
   throw new Error(`Content does not fit in Versions 1-${maxVersion}.`);
 }
 
-function evaluate(base, targets, paddingBytes = base.paddingBytes) {
+function evaluate(base, targets, paddingBytes = base.paddingBytes, allowApproximation = false) {
   const model = paddingBytes === base.paddingBytes ? base : generateBaseline({
     version: base.version, level: base.level, mask: base.mask,
     message: base.message, type: base.type, paddingBytes: paddingBytes?.length ? paddingBytes : null,
   });
-  const edited = applyChanges(model.matrix, targets);
+  const { edited, appliedTargets, imageStats } = applyImageConstraints(model, targets, allowApproximation);
   const damage = analyzeDamage(model, edited);
   const counts = damage.blockStats.map((block) => block.totalDamaged);
   return {
-    model, edited, damage,
+    model, edited, damage, appliedTargets, imageStats,
+    imageMismatches: imageStats.reduce((sum, image) => sum + image.total - image.matched, 0),
     readable: damage.blockStats.every((block) => block.totalDamaged <= block.theoreticalLimit) &&
-      damage.metadataStats.every((region) => region.damagedBits <= region.theoreticalLimit),
+      damage.metadataStats.every((region) => region.damagedBits <= region.theoreticalLimit) &&
+      imageStats.every((image) => image.matched >= image.minimum),
     maximumUse: Math.max(
       ...damage.blockStats.map((block) => block.totalDamaged / block.theoreticalLimit),
       ...damage.metadataStats.map((region) => region.damagedBits / region.theoreticalLimit),
@@ -65,13 +68,14 @@ function compare(a, b) {
   return Number(b.readable) - Number(a.readable) ||
     a.maximumUse - b.maximumUse || a.totalDamaged - b.totalDamaged ||
     a.metadataDamaged - b.metadataDamaged ||
+    a.imageMismatches - b.imageMismatches ||
     LEVELS.indexOf(a.model.level) - LEVELS.indexOf(b.model.level) ||
     a.model.paddingStartCodeword - b.model.paddingStartCodeword ||
     a.paddingChanges - b.paddingChanges ||
     a.penalty - b.penalty;
 }
 
-export async function optimizeDrawing({ message, version, level = "auto", mask = "auto", targets = [], previous, allowMetadata = false, allowAlignment = false }, onBest = () => {}) {
+export async function optimizeDrawing({ message, version, level = "auto", mask = "auto", targets = [], previous, allowMetadata = false, allowAlignment = false, allowImageApproximation = false }, onBest = () => {}) {
   if (!Number.isInteger(version) || version < 1 || version > 40) {
     throw new Error("Version must be between 1 and 40.");
   }
@@ -82,6 +86,7 @@ export async function optimizeDrawing({ message, version, level = "auto", mask =
   const levels = fittingLevels(message, version, level);
   if (!levels.length) throw new Error("Content does not fit at this version and ECC level.");
   let best = null;
+  const assess = (base, editableTargets, padding) => evaluate(base, editableTargets, padding, allowImageApproximation);
   const record = (result) => {
     if (!best || compare(result, best) < 0) {
       best = result;
@@ -100,7 +105,7 @@ export async function optimizeDrawing({ message, version, level = "auto", mask =
           row >= 0 && column >= 0 && row < base.matrix.length && column < base.matrix.length &&
           canDrawOn(base, row, column, allowMetadata, allowAlignment),
         );
-        const standard = record(evaluate(base, editableTargets));
+        const standard = record(assess(base, editableTargets));
         if (!editableTargets.some(({ row, column }) =>
           ["data", "ecc"].includes(base.metadata[row][column].kind),
         )) continue;
@@ -108,7 +113,7 @@ export async function optimizeDrawing({ message, version, level = "auto", mask =
         const variants = [standard];
         if (previous && previous.version === version && previous.level === candidateLevel &&
             previous.mask === candidateMask && previous.message === message && previous.type === type) {
-          variants.push(record(evaluate(previous, editableTargets)));
+          variants.push(record(assess(previous, editableTargets)));
         }
         const cacheKey = `${version}:${candidateLevel}:${base.paddingStartCodeword}`;
         if (!paddingBasis) {
@@ -124,7 +129,7 @@ export async function optimizeDrawing({ message, version, level = "auto", mask =
           const key = padding.join(",");
           if (seen.has(key)) continue;
           seen.add(key);
-          variants.push(record(evaluate(base, editableTargets, padding)));
+          variants.push(record(assess(base, editableTargets, padding)));
         }
 
         // Each Reed-Solomon block is independent: combine the best strategy per block.
@@ -140,7 +145,7 @@ export async function optimizeDrawing({ message, version, level = "auto", mask =
           }
           offset += block.dataCount;
         });
-        record(evaluate(base, editableTargets, combined));
+        record(assess(base, editableTargets, combined));
       }
       await new Promise((resolve) => setTimeout(resolve, 0));
     }

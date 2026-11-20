@@ -41,9 +41,13 @@ try {
       if (match) { clearTimeout(timeout); resolve(new URL(match[1])); }
     });
   });
-  const pages = await (await fetch(`http://${endpoint.host}/json/list`)).json();
+  const pages = await (await fetch(`http://${endpoint.host}/json/list`, { signal: AbortSignal.timeout(10000) })).json();
   socket = new WebSocket(pages.find((page) => page.type === "page").webSocketDebuggerUrl);
-  await new Promise((resolve) => socket.addEventListener("open", resolve, { once: true }));
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Browser connection timed out")), 10000);
+    socket.addEventListener("open", () => { clearTimeout(timeout); resolve(); }, { once: true });
+    socket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("Browser connection failed")); }, { once: true });
+  });
   let sequence = 0;
   const pending = new Map();
   socket.addEventListener("message", ({ data }) => {
@@ -58,7 +62,14 @@ try {
   });
   const command = (method, params = {}) => new Promise((resolve, reject) => {
     const id = ++sequence;
-    pending.set(id, { resolve, reject });
+    const timeout = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Browser command timed out: ${method}`));
+    }, 15000);
+    pending.set(id, {
+      resolve: (value) => { clearTimeout(timeout); resolve(value); },
+      reject: (error) => { clearTimeout(timeout); reject(error); },
+    });
     socket.send(JSON.stringify({ id, method, params }));
   });
   const evaluate = async (expression) => {
@@ -76,6 +87,38 @@ try {
   const ready = () => until('document.querySelector("#status")?.textContent.startsWith("Within ECC limit (") && !document.querySelector("#png").disabled');
   const set = (selector, value, event = "change") => evaluate(`(() => { const input = document.querySelector(${JSON.stringify(selector)}); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event(${JSON.stringify(event)}, {bubbles:true})); })()`);
   const click = (selector) => evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const capture = async (suffix = "") => {
+    if (!process.env.DRAWONQR_SCREENSHOT) return;
+    const { data } = await command("Page.captureScreenshot", { format: "png" });
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(process.env.DRAWONQR_SCREENSHOT.replace(/\.png$/, `${suffix}.png`), Buffer.from(data, "base64"));
+  };
+  const settled = () => until('!document.querySelector("#png").disabled && !document.querySelector("#status").classList.contains("is-working")');
+  const pointOnQR = (x, y) => evaluate(`(() => { const r = document.querySelector('#qr-grid').getBoundingClientRect(); return {x:r.x+r.width*${x},y:r.y+r.height*${y}}; })()`);
+  const centerOf = (selector) => evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+  const drag = async (from, to) => {
+    await command("Input.dispatchMouseEvent", { type: "mousePressed", ...from, button: "left", buttons: 1, clickCount: 1 });
+    await command("Input.dispatchMouseEvent", { type: "mouseMoved", ...to, button: "left", buttons: 1 });
+    await command("Input.dispatchMouseEvent", { type: "mouseReleased", ...to, button: "left", buttons: 0, clickCount: 1 });
+  };
+  const upload = async (patterns, drop = false) => {
+    await evaluate(`(async () => {
+      const transfer = new DataTransfer();
+      for (const pattern of ${JSON.stringify(patterns)}) {
+        const canvas = document.createElement('canvas'); canvas.width=64; canvas.height=32;
+        const ctx = canvas.getContext('2d');
+        for(let x=0;x<64;x++) {
+          const value=pattern==='gradient' ? Math.round(x*255/63) : pattern==='black' ? 0 : 255;
+          ctx.fillStyle='rgb('+value+','+value+','+value+')'; ctx.fillRect(x,0,1,32);
+        }
+        const blob = await new Promise(resolve => canvas.toBlob(resolve));
+        transfer.items.add(new File([blob], pattern+'.png', {type:'image/png'}));
+      }
+      if (${drop}) document.querySelector('#image-drop').dispatchEvent(new DragEvent('drop', {dataTransfer:transfer,bubbles:true,cancelable:true}));
+      else { const input=document.querySelector('#image-file'); input.files=transfer.files; input.dispatchEvent(new Event('change')); }
+    })()`);
+    await until('!document.querySelector("#image-confirm").disabled');
+  };
   const stroke = async (from, to = from) => {
     const bounds = await evaluate('(() => { const c = document.querySelector("canvas"), r = c.getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height,size:c.width}; })()');
     const point = ({ row, column }) => ({ x: bounds.x + (column + .5) * bounds.w / bounds.size, y: bounds.y + (row + .5) * bounds.h / bounds.size });
@@ -440,20 +483,166 @@ try {
   assert.deepEqual(await timingPixel(), [36, 92, 166, 255]);
   console.log("pass: blue timing patterns, opt-in drawing, highlight toggle, undo/redo, and relocking");
 
-  await command("Page.captureScreenshot", { format: "png" }).then(async ({data}) => {
-    if (process.env.DRAWONQR_SCREENSHOT) {
-      const { writeFile } = await import("node:fs/promises");
-      await writeFile(process.env.DRAWONQR_SCREENSHOT, Buffer.from(data, "base64"));
-    }
-  });
+  assert.equal(await evaluate('document.querySelector("#allow-image-approximation").checked'), false);
+  await click("#add-image");
+  assert.equal(await evaluate('document.querySelector("#image-dialog").open'), true);
+  assert.equal(await evaluate('document.querySelector("#image-confirm").disabled'), true);
+  await evaluate(`(() => {
+    const transfer=new DataTransfer(); transfer.items.add(new File(['not an image'],'test.txt',{type:'text/plain'}));
+    document.querySelector('#image-file').files=transfer.files;
+    document.querySelector('#image-file').dispatchEvent(new Event('change'));
+  })()`);
+  await until('document.querySelector("#image-upload-error").textContent === "Choose an image file."');
+  assert.equal(await evaluate('document.querySelector("#image-confirm").disabled'), true);
+  await upload(["gradient"]);
+  await capture("-popup");
+  assert.equal(await evaluate('document.querySelector("#image-threshold").value'), "0");
+  const binaryPreview = await evaluate(`(() => {
+    const c=document.querySelector('#image-upload-preview'), p=c.getContext('2d').getImageData(0,0,c.width,c.height).data;
+    let dark=0, white=0;
+    for(let i=0;i<p.length;i+=4) { if(p[i]===0) dark++; else if(p[i]===255) white++; else return false; }
+    return dark/(dark+white);
+  })()`);
+  assert.ok(binaryPreview >= .45 && binaryPreview <= .55);
+  await set("#image-threshold", "256", "input");
+  assert.equal(await evaluate("document.querySelector('#image-upload-preview').getContext('2d').getImageData(63,0,1,1).data[0]"), 0);
+  await set("#image-threshold", "0", "input");
+  const beforeImageJobs = await evaluate("__jobs.length");
+  await click("#image-confirm");
+  await evaluate("new Promise(resolve => setTimeout(resolve, 200))");
+  assert.equal(await evaluate("__jobs.length"), beforeImageJobs, "Image changes debounce for 500ms");
+  await settled();
+  assert.equal(await evaluate('document.querySelector("#image-dialog").open'), false);
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 1);
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image.is-selected").length'), 1);
+  assert.equal(await evaluate('document.querySelector("#image-preview").hidden'), false);
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image.is-selected button").length'), 6);
+  assert.equal(await evaluate("__lastResult.imageStats[0].matched === __lastResult.imageStats[0].total"), true);
+  const firstImage = await evaluate('document.querySelector(".placed-image").dataset.imageId');
+  await drag(await pointOnQR(.95, .95), await pointOnQR(.95, .95));
+  assert.equal(await evaluate('document.querySelector("#image-preview").hidden'), true);
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 1);
+  await drag(await pointOnQR(.5, .5), await pointOnQR(.6, .55));
+  await settled();
+  const moved = await evaluate('(() => { const s=document.querySelector(".placed-image").style; return [parseFloat(s.left),parseFloat(s.top),parseFloat(s.width),parseFloat(s.height)]; })()');
+  assert.ok(Math.abs(moved[0] - 60) < .01 && Math.abs(moved[1] - 55) < .01);
+  const corner = await centerOf(".is-selected .corner-3");
+  await drag(corner, { x: corner.x + 30, y: corner.y + 15 });
+  await settled();
+  const scaled = await evaluate('(() => { const s=document.querySelector(".placed-image").style; return [parseFloat(s.width),parseFloat(s.height),s.transform]; })()');
+  assert.ok(scaled[0] > moved[2]);
+  assert.ok(Math.abs(scaled[0] / scaled[1] - 2) < .00002, `Serialized image aspect ratio: ${scaled}`);
+  const center = await centerOf(".is-selected");
+  await drag(await centerOf(".is-selected .image-rotate"), { x: center.x + 120, y: center.y });
+  await settled();
+  const rotated = await evaluate('document.querySelector(".placed-image").style.transform');
+  assert.notEqual(rotated, scaled[2]);
+  await click("#undo");
+  await settled();
+  assert.equal(await evaluate('document.querySelector(".placed-image").style.transform'), scaled[2]);
+  await click("#redo");
+  await settled();
+  assert.equal(await evaluate('document.querySelector(".placed-image").style.transform'), rotated);
+  await capture("-selected");
+  console.log("pass: image upload, threshold, delayed optimization, selection, dragging, aspect-locked scaling, rotation, undo/redo");
+
+  const imageTarget = await evaluate("__jobs.at(-1).settings.targets.find(t => t.imageId !== undefined)");
+  await click('[data-tool="pencil"]');
+  await click(imageTarget.value ? '[data-color="white"]' : '[data-color="black"]');
+  await stroke(imageTarget);
+  await settled();
+  assert.equal(await evaluate(`__jobs.at(-1).settings.targets.find(t=>t.row===${imageTarget.row} && t.column===${imageTarget.column}).imageId`), undefined);
+  assert.equal(await evaluate(`__lastResult.edited[${imageTarget.row}][${imageTarget.column}]`), !imageTarget.value);
+  await click('[data-tool="restore"]');
+  await stroke(imageTarget);
+  await settled();
+  assert.equal(await evaluate(`__jobs.at(-1).settings.targets.find(t=>t.row===${imageTarget.row} && t.column===${imageTarget.column}).imageId`), firstImage);
+
+  await click("#add-image");
+  await upload(["black", "white"], true);
+  await click("#image-confirm");
+  await settled();
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 3);
+  const ids = await evaluate('[...document.querySelectorAll(".placed-image")].map(e=>e.dataset.imageId)');
+  await click("#undo");
+  await settled();
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 1);
+  await click("#redo");
+  await settled();
+  assert.deepEqual(await evaluate('[...document.querySelectorAll(".placed-image")].map(e=>e.dataset.imageId)'), ids);
+  assert.equal(await evaluate(`__jobs.at(-1).settings.targets.some(t=>t.imageId===${JSON.stringify(ids[1])})`), false);
+  assert.equal(await evaluate(`__jobs.at(-1).settings.targets.filter(t=>t.imageId===${JSON.stringify(ids[2])}).every(t=>!t.value)`), true);
+  await drag(await pointOnQR(.5, .5), await pointOnQR(.6, .55));
+  await settled();
+  const overlapJobs = await evaluate("__jobs.length");
+  await drag(await pointOnQR(.28, .5), await pointOnQR(.28, .5));
+  assert.equal(await evaluate('document.querySelector(".is-selected").dataset.imageId'), ids[1]);
+  assert.equal(await evaluate("__jobs.length"), overlapJobs, "Selecting an older image does not change constraints");
+  assert.equal(await evaluate('document.querySelectorAll(".is-selected").length'), 1);
+  assert.equal(await evaluate("(() => { const c=document.querySelector('#image-preview'); return c.getContext('2d').getImageData(Math.floor(c.width*.55),Math.floor(c.height*.5),1,1).data[0]; })()"), 0);
+  assert.equal(await evaluate("(() => { const size=__lastResult.model.matrix.length; return __jobs.at(-1).settings.targets.find(t=>t.row===Math.floor(size*.5) && t.column===Math.floor(size*.55)).value; })()"), false);
+  const relative = await evaluate('[...document.querySelectorAll(".placed-image")].map(e=>[e.style.left,e.style.top,e.style.width,e.style.height,e.style.transform])');
+  await set("#version", "3");
+  await settled();
+  assert.deepEqual(await evaluate('[...document.querySelectorAll(".placed-image")].map(e=>[e.style.left,e.style.top,e.style.width,e.style.height,e.style.transform])'), relative);
+  await set("#content", "new content", "input");
+  await settled();
+  assert.deepEqual(await evaluate('[...document.querySelectorAll(".placed-image")].map(e=>[e.style.left,e.style.top,e.style.width,e.style.height,e.style.transform])'), relative);
+  await click("#allow-image-approximation");
+  await settled();
+  assert.equal(await evaluate("__jobs.at(-1).settings.allowImageApproximation"), true);
+  assert.equal(await evaluate("__lastResult.imageStats.every(image=>image.matched>=Math.ceil(image.total*.8))"), true);
+  await click("#svg");
+  assert.equal(await evaluate("__export.text().then(svg=>!svg.includes('<image') && !svg.includes('placed-image'))"), true);
+  console.log("pass: manual priority, multiple dropped images, overlap order, relative placement, approximation, and module-only export");
+
+  await click('[data-tool="select"]');
+  await drag(await pointOnQR(.6, .55), await pointOnQR(.15, .15));
+  await settled();
+  assert.equal(await evaluate("__jobs.at(-1).settings.targets.some(t=>t.row===3 && t.column===3)"), false);
+  const previewAlpha = await evaluate("(() => { const c=document.querySelector('#image-preview'); return c.getContext('2d').getImageData(Math.floor(3.5/Number(document.querySelector('#qr-canvas').width)*c.width),Math.floor(3.5/Number(document.querySelector('#qr-canvas').height)*c.height),1,1).data[3]; })()");
+  assert.equal(previewAlpha, 0, "Protected finder modules are above the source preview");
+  await click(".is-selected .image-delete");
+  await settled();
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 2);
+  await click("#undo");
+  await settled();
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 3);
+  await click("#redo");
+  await settled();
+  assert.equal(await evaluate('document.querySelectorAll(".placed-image").length'), 2);
+  await click("#add-image");
+  await command("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await command("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  assert.equal(await evaluate('document.querySelector("#image-dialog").open'), false);
+  console.log("pass: images behind protected patterns, deletion, history, and popup keyboard close");
+
+  await capture();
 
   await command("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 1, mobile: false });
+  await command("Emulation.setTouchEmulationEnabled", { enabled: true });
+  await evaluate("window.scrollTo(0,0)");
+  const touchImage = await evaluate('(() => { const e=[...document.querySelectorAll(".placed-image")].at(-1); return {id:e.dataset.imageId,x:parseFloat(e.style.left)/100,y:parseFloat(e.style.top)/100}; })()');
+  const touchFrom = await pointOnQR(touchImage.x, touchImage.y), touchTo = await pointOnQR(touchImage.x + .05, touchImage.y + .1);
+  await command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchFrom] });
+  await command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [touchTo] });
+  await command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await settled();
+  const touched = await evaluate(`(() => { const s=document.querySelector('[data-image-id="${touchImage.id}"]').style; return [parseFloat(s.left),parseFloat(s.top)]; })()`);
+  assert.ok(Math.abs(touched[0] - (touchImage.x + .05) * 100) < .01 && Math.abs(touched[1] - (touchImage.y + .1) * 100) < .01);
+  await capture("-mobile");
+  await click("#add-image");
+  await upload(["gradient"]);
+  assert.equal(await evaluate("(() => { const r=document.querySelector('#image-dialog').getBoundingClientRect(); return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight; })()"), true);
+  await capture("-mobile-popup");
+  await click("#image-close");
   assert.ok(await evaluate("document.documentElement.scrollWidth <= innerWidth"));
   assert.deepEqual(errors, []);
   console.log("pass: mobile layout and no browser exceptions");
 } finally {
   socket?.close();
   if (chrome.pid) spawnSync("taskkill", ["/PID", String(chrome.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+  server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
   if (profile.startsWith(resolve(tmpdir()) + sep)) {
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

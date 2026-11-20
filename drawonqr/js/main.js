@@ -2,11 +2,15 @@ import { analyzeDamage, applyChanges, canDrawOn, generateBaseline } from "./qr-e
 import { fittingLevels, fittingModes, smallestVersion } from "./optimizer.js";
 import { DrawingCanvas } from "./canvas.js";
 import { download, pngBlob, svgBlob } from "./export.js";
+import { sampleImageTargets } from "./image-data.js";
+import { ImageEditor } from "./image-editor.js";
+import { ImageUpload } from "./image-upload.js";
 
 const elements = Object.fromEntries([
   "content", "version", "ecc", "mask", "qr-grid", "qr-canvas", "undo", "redo",
   "status", "blocks", "svg", "png", "share", "highlight-areas", "grid-legend",
   "allow-metadata", "metadata-blocks", "allow-alignment",
+  "add-image", "allow-image-approximation",
 ].map((id) => [id, document.getElementById(id)]));
 const grid = new DrawingCanvas(elements["qr-grid"], elements["qr-canvas"]);
 const MAX_VERSION = 10;
@@ -15,9 +19,58 @@ const state = {
   tool: "pencil", value: true, stroke: null, preview: null,
   revision: 0, ready: false, busy: false, queued: false,
   invalid: false, animating: false, shareFile: null,
+  appliedTargets: null,
 };
 let worker;
 let timer;
+let runAfter = 0;
+const images = new ImageEditor(elements["qr-grid"], {
+  ready: () => state.ready,
+  snapshot,
+  view,
+  change: changeImages,
+  commit: (before) => {
+    state.history.push(before);
+    state.future = [];
+    updateControls();
+  },
+});
+new ImageUpload((assets) => {
+  if (!state.ready) return;
+  finishStroke();
+  const before = snapshot();
+  images.add(assets);
+  selectTool("select");
+  state.history.push(before);
+  state.future = [];
+  changeImages();
+});
+
+function snapshot() {
+  return { targets: new Map(state.targets), images: images.snapshot() };
+}
+
+function requirements() {
+  if (!state.model) return new Map();
+  const targets = sampleImageTargets(images.images, state.model,
+    elements["allow-metadata"].checked, elements["allow-alignment"].checked);
+  for (const [key, target] of state.preview ?? state.targets) targets.set(key, target);
+  return targets;
+}
+
+function render() {
+  const current = view();
+  if (state.model) grid.render(current);
+  images.render(current);
+}
+
+function changeImages() {
+  resetWorker();
+  grid.stop();
+  state.animating = false;
+  schedule(500);
+  render();
+}
 
 function settings() {
   return {
@@ -27,21 +80,24 @@ function settings() {
     mask: elements.mask.value,
     allowMetadata: elements["allow-metadata"].checked,
     allowAlignment: elements["allow-alignment"].checked,
+    allowImageApproximation: elements["allow-image-approximation"].checked,
   };
 }
 
 function view() {
   return {
     model: state.model,
-    targets: state.preview ?? state.targets,
+    targets: state.appliedTargets ?? requirements(),
+    manualTargets: state.preview ?? state.targets,
     invalid: state.invalid,
     highlightAreas: elements["highlight-areas"].checked,
     allowMetadata: elements["allow-metadata"].checked,
+    allowAlignment: elements["allow-alignment"].checked,
   };
 }
 
 function matrix() {
-  return applyChanges(state.model.matrix, [...state.targets.values()]);
+  return applyChanges(state.model.matrix, [...view().targets.values()]);
 }
 
 function canPaint(row, column) {
@@ -62,6 +118,7 @@ function updateControls() {
   elements.share.title = shareSupported ? "" : "Image sharing is unavailable in this browser";
   elements.undo.disabled = !state.ready || !state.history.length || state.animating;
   elements.redo.disabled = !state.ready || !state.future.length || state.animating;
+  elements["add-image"].disabled = !state.ready;
 }
 
 function showDamage(result) {
@@ -118,18 +175,21 @@ async function receive({ data }) {
   if (data.type === "error") {
     grid.stop();
     state.ready = false;
-    grid.render(view());
+    render();
     message(data.message, "is-error");
   } else if (data.type === "candidate") {
     state.model = data.result.model;
+    state.appliedTargets = new Map(data.result.appliedTargets.map((target) => [target.row * state.model.matrix.length + target.column, target]));
     showDamage(data.result);
   } else if (data.type === "done") {
     state.model = data.result.model;
+    state.appliedTargets = new Map(data.result.appliedTargets.map((target) => [target.row * state.model.matrix.length + target.column, target]));
     state.invalid = !data.result.readable;
     state.animating = true;
     showDamage(data.result);
     elements.ecc.options[0].textContent = `Auto (${state.model.level})`;
     elements.mask.options[0].textContent = `Auto (${state.model.mask})`;
+    images.render();
     await grid.finish(view());
     if (data.revision !== state.revision) return;
     state.animating = false;
@@ -154,6 +214,12 @@ async function receive({ data }) {
 
 function pump() {
   if (!state.ready || state.busy || state.stroke || !state.queued) return;
+  const remaining = runAfter - performance.now();
+  if (remaining > 0) {
+    clearTimeout(timer);
+    timer = setTimeout(pump, Math.ceil(remaining));
+    return;
+  }
   state.queued = false;
   state.busy = true;
   state.invalid = false;
@@ -174,19 +240,22 @@ function pump() {
   updateControls();
   worker.postMessage({
     revision: state.revision,
-    settings: { ...settings(), targets: [...state.targets.values()], previous: state.model },
+    settings: { ...settings(), targets: [...requirements().values()], previous: state.model },
   });
 }
 
-function schedule() {
+function schedule(delay = 80) {
   state.revision += 1;
   state.queued = true;
+  state.appliedTargets = null;
   clearTimeout(timer);
   updateControls();
-  timer = setTimeout(pump, 80);
+  runAfter = performance.now() + delay;
+  timer = setTimeout(pump, delay);
 }
 
 function rebuild({ fit = false, clear = false } = {}) {
+  images.finish();
   clearTimeout(timer);
   state.revision += 1;
   resetWorker();
@@ -196,6 +265,7 @@ function rebuild({ fit = false, clear = false } = {}) {
   state.animating = false;
   state.stroke = state.preview = null;
   state.shareFile = null;
+  state.appliedTargets = null;
   try {
     if (fit) elements.version.value = smallestVersion(elements.content.value, elements.ecc.value, MAX_VERSION);
     const config = settings();
@@ -217,7 +287,7 @@ function rebuild({ fit = false, clear = false } = {}) {
     state.future = [];
     state.invalid = false;
     state.ready = true;
-    grid.render(view());
+    render();
     schedule();
   } catch (error) {
     message(error.message, "is-error");
@@ -243,7 +313,7 @@ function paintLine(from, to) {
 
 function moveStroke(module) {
   if (state.tool === "rectangle") {
-    state.preview = new Map(state.stroke.before);
+    state.preview = new Map(state.stroke.before.targets);
     const start = state.stroke.start;
     for (let row = Math.min(start.row, module.row); row <= Math.max(start.row, module.row); row += 1) {
       for (let column = Math.min(start.column, module.column); column <= Math.max(start.column, module.column); column += 1) {
@@ -252,7 +322,7 @@ function moveStroke(module) {
     }
   } else paintLine(state.stroke.last, module);
   state.stroke.last = module;
-  grid.render(view());
+  render();
 }
 
 function finishStroke(event) {
@@ -260,7 +330,7 @@ function finishStroke(event) {
   if (state.preview) state.targets = state.preview;
   const before = state.stroke.before;
   state.stroke = state.preview = null;
-  const changed = before.size !== state.targets.size || [...before].some(([key, target]) => state.targets.get(key)?.value !== target.value);
+  const changed = before.targets.size !== state.targets.size || [...before.targets].some(([key, target]) => state.targets.get(key)?.value !== target.value);
   if (changed) {
     state.history.push(before);
     state.future = [];
@@ -269,20 +339,21 @@ function finishStroke(event) {
     state.queued = true;
     pump();
   }
-  grid.render(view());
+  render();
   updateControls();
 }
 
 elements["qr-grid"].addEventListener("pointerdown", (event) => {
-  if (!state.ready || state.stroke || event.button !== 0) return;
+  if (!state.ready || state.stroke || state.tool === "select" || event.button !== 0) return;
   const module = grid.moduleFromPointer(event);
   if (!module || !canPaint(module.row, module.column)) return;
   event.preventDefault();
   state.revision += 1;
   state.queued = true;
   state.animating = false;
+  state.appliedTargets = null;
   grid.stop();
-  state.stroke = { before: new Map(state.targets), start: module, last: module, pointerId: event.pointerId };
+  state.stroke = { before: snapshot(), start: module, last: module, pointerId: event.pointerId };
   elements["qr-grid"].focus({ preventScroll: true });
   elements["qr-grid"].setPointerCapture(event.pointerId);
   moveStroke(module);
@@ -296,22 +367,36 @@ window.addEventListener("pointerup", finishStroke);
 window.addEventListener("pointercancel", finishStroke);
 elements["qr-grid"].addEventListener("lostpointercapture", finishStroke);
 
+function selectTool(tool) {
+  images.finish();
+  state.tool = tool;
+  images.active = tool === "select";
+  elements["qr-grid"].classList.toggle("is-selecting", images.active);
+  document.querySelectorAll("[data-tool]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.tool === tool)));
+  if (!images.active) images.selected = null;
+  render();
+}
+
 document.querySelectorAll("[data-tool], [data-color]").forEach((button) => {
   button.addEventListener("click", () => {
     finishStroke();
     const attribute = button.hasAttribute("data-tool") ? "data-tool" : "data-color";
     document.querySelectorAll(`[${attribute}]`).forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
-    if (attribute === "data-tool") state.tool = button.dataset.tool;
+    if (attribute === "data-tool") selectTool(button.dataset.tool);
     else state.value = button.dataset.color === "black";
   });
 });
 
 function restoreHistory(from, to) {
   if (!state.ready || !from.length || state.animating || state.stroke) return;
-  to.push(new Map(state.targets));
-  state.targets = from.pop();
+  images.finish();
+  to.push(snapshot());
+  const restored = from.pop();
+  state.targets = new Map(restored.targets);
+  images.restore(restored.images);
+  state.appliedTargets = null;
   grid.stop();
-  grid.render(view());
+  render();
   schedule();
 }
 elements.undo.addEventListener("click", () => restoreHistory(state.history, state.future));
@@ -326,11 +411,12 @@ for (const id of ["allow-metadata", "allow-alignment"]) {
     if (!state.model) return;
     const protect = (targets) => new Map([...targets].filter(([, { row, column }]) => canPaint(row, column)));
     state.targets = protect(state.targets);
-    state.history = state.history.map(protect);
-    state.future = state.future.map(protect);
+    state.history = state.history.map((entry) => ({ ...entry, targets: protect(entry.targets) }));
+    state.future = state.future.map((entry) => ({ ...entry, targets: protect(entry.targets) }));
     grid.stop();
     state.animating = false;
-    grid.render(view());
+    state.appliedTargets = null;
+    render();
     showDamage({ damage: analyzeDamage(state.model, matrix()) });
     if (state.ready) schedule();
   });
@@ -340,6 +426,9 @@ elements["highlight-areas"].addEventListener("change", () => {
   if (!state.model) return;
   if (state.animating) grid.stop();
   grid.render(view());
+});
+elements["allow-image-approximation"].addEventListener("change", () => {
+  if (state.ready) schedule();
 });
 elements.svg.addEventListener("click", () => download(svgBlob(matrix()), filename("svg")));
 elements.png.addEventListener("click", async () => download(await pngBlob(matrix()), filename("png")));
@@ -351,7 +440,7 @@ elements.share.addEventListener("click", async () => {
   }
 });
 document.addEventListener("keydown", (event) => {
-  if (event.target.matches("input, textarea, select") || event.altKey) return;
+  if (event.target.matches("input, textarea, select") || event.altKey || document.getElementById("image-dialog").open) return;
   if (event.ctrlKey || event.metaKey) {
     const key = event.key.toLowerCase();
     if (key === "z" || key === "y") {
